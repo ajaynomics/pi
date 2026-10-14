@@ -387,6 +387,8 @@ export class AgentSession {
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
 	private _isAgentRunActive = false;
+	/** Set while a submitted prompt runs input handlers and auth checks, before its run starts. */
+	private _promptPreparation: Promise<void> | undefined;
 	private _agentRunAbortRequested = false;
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
@@ -2079,6 +2081,25 @@ export class AgentSession {
 			);
 		}
 
+		// Input handlers and auth checks can take a while. Until this prompt's run starts, messages that
+		// would start a run wait for it instead of starting one that makes this prompt fail as busy.
+		if (this.isStreaming || this._promptPreparation) return this._submitPrompt(text, options);
+		const { promise, resolve } = Promise.withResolvers<void>();
+		this._promptPreparation = promise;
+		const release = () => {
+			if (this._promptPreparation === promise) this._promptPreparation = undefined;
+			resolve();
+		};
+		try {
+			await this._submitPrompt(text, options, release);
+		} finally {
+			release();
+		}
+	}
+
+	private async _submitPrompt(text: string, options?: PromptOptions, onRunStarting?: () => void): Promise<void> {
+		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
+		const preflightResult = options?.preflightResult;
 		// Emit input event for extension interception (before skill/template expansion)
 		const processedInput = await this._runInputHandlers(
 			text,
@@ -2135,9 +2156,12 @@ export class AgentSession {
 			throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
 		}
 
-		await this._startRun({ messageType: "user", prompt: expandedText, images: currentImages }, () =>
+		const run = this._startRun({ messageType: "user", prompt: expandedText, images: currentImages }, () =>
 			preflightResult?.("started"),
 		);
+		// _startRun marks the session busy synchronously, so waiting messages now queue into this run.
+		onRunStarting?.();
+		await run;
 	}
 
 	/**
@@ -2341,6 +2365,9 @@ export class AgentSession {
 			} else {
 				this.agent.steer(appMessage);
 			}
+		} else if (options?.triggerTurn && this._promptPreparation) {
+			await this._promptPreparation;
+			await this.sendCustomMessage(message, options);
 		} else if (options?.triggerTurn) {
 			if (this._isEmittingAgentSettled) {
 				this._deferredSettledActions.push(async () => await this.sendCustomMessage(message, options));
