@@ -2366,8 +2366,17 @@ export class AgentSession {
 				this.agent.steer(appMessage);
 			}
 		} else if (options?.triggerTurn && this._promptPreparation) {
-			await this._promptPreparation;
-			await this.sendCustomMessage(message, options);
+			// Like the agent_settled deferral, return now and deliver once the prompt's run starts or its input
+			// ends without one. Awaiting here would deadlock an input handler that awaits this call.
+			void this._promptPreparation
+				.then(() => this.sendCustomMessage(message, options))
+				.catch((err) => {
+					this._extensionRunner.emitError({
+						extensionPath: "<runtime>",
+						event: "send_message",
+						error: err instanceof Error ? err.message : String(err),
+					});
+				});
 		} else if (options?.triggerTurn) {
 			if (this._isEmittingAgentSettled) {
 				this._deferredSettledActions.push(async () => await this.sendCustomMessage(message, options));

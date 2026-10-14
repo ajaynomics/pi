@@ -79,4 +79,34 @@ describe("AgentSession prompt preparation", () => {
 		expect(requests).toHaveLength(1);
 		expect(userTexts(requests[0])).toEqual(["peer mail"]);
 	});
+
+	it("does not deadlock an input handler that awaits a triggering custom message", async () => {
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("input", async (event) => {
+						if (event.text !== "human") return;
+						await harness.session.sendCustomMessage(
+							{ customType: "mail", content: "peer mail", display: true },
+							{ triggerTurn: true, deliverAs: "followUp" },
+						);
+						return { action: "handled" };
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		const requests: TranscriptContext[] = [];
+		harness.setResponses([
+			(context: TranscriptContext) => {
+				requests.push(context);
+				return fauxAssistantMessage("ok");
+			},
+		]);
+		await harness.session.prompt("human");
+		await harness.session.waitForIdle();
+
+		expect(requests).toHaveLength(1);
+		expect(userTexts(requests[0])).toEqual(["peer mail"]);
+	});
 });
